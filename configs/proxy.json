@@ -1,0 +1,13 @@
+{
+  "bind_host": "127.0.0.1",
+  "port": 18888,
+  "whisper": {
+    "root": "/Users/peng.zhi/Documents/Object/参考项目/whisper.cpp",
+    "bin": "build/bin/whisper-server",
+    "models_dir": "models",
+    "model": "medium",
+    "language": "zh",
+    "ready_timeout_sec": 180,
+    "inference_timeout_sec": 600
+  }
+}

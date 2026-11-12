@@ -1,0 +1,11 @@
+{
+  "premium": [
+    {
+      "id": "doubao",
+      "endpoint": "wss://openspeech.bytedance.com/api/v3/sauc/bigmodel_nostream",
+      "resource_id": "volc.seedasr.sauc.duration",
+      "api_key_env": "DOUBAO_ASR_API_KEY",
+      "timeout_sec": 12
+    }
+  ]
+}
