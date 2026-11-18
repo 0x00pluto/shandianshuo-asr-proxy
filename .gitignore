@@ -19,6 +19,7 @@ Thumbs.db
 cache/
 temp/
 output/
+configs/
 .env
 .env.*
 !.env.example

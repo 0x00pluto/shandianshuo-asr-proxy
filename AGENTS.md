@@ -59,7 +59,8 @@
 | `scripts/` | CLI 入口，一个脚本 = 一个工作流入口 | 是 |
 | `skills/` | 可发布成员技能；每个技能一个子目录 `skills/<slug>/` | 是 |
 | `assets/` | 输入侧原料与样例 | 目录是；大媒体见 .gitignore |
-| `configs/` | 程序行为配置（怎么跑：超时、静音、开关等）；出厂默认入库 | 是 |
+| `config-templates/` | 程序行为配置出厂默认（`proxy.json` / `premium.json`） | 是 |
+| `configs/` | 运行时配置（首次从 `config-templates/` 拷入；可写回本机路径） | 否（整目录 gitignore） |
 | `tests/` | 测试，结构镜像 `src/` 与 `scripts/` | 是 |
 | `docs/` | 文档，见 docs 约定 | 是 |
 | `specs/prds/` | 产品需求（PRD）；索引见 `specs/prds/prd-wiki-index.md` | 是 |
@@ -68,7 +69,7 @@
 | `temp/` | 中间产物，可随时清空 | 否 |
 | `output/` | 最终产物，按 `output/<主题>/` 归档 | 否 |
 
-约束：`cache/`、`temp/`、`output/`、`.env` 全部 gitignore；删掉它们不影响代码可运行。禁止根目录散文件。根目录 `evo_agent_pack.json` 首次发工牌再建（入库）。程序行为配置进 `configs/`，不要写进 `assets/`；密钥与本机私密走环境变量 / `.env`（可用 `.env.example` 作模板），不进 `configs/`。运行时用户覆盖由产品约定，不要为此再开顶层目录。
+约束：`cache/`、`temp/`、`output/`、`configs/`、`.env` 全部 gitignore；删掉它们不影响代码可运行（`configs/` 会从 `config-templates/` 再生）。禁止根目录散文件。根目录 `evo_agent_pack.json` 首次发工牌再建（入库）。出厂行为配置改 `config-templates/`；本机调参改 `configs/`（勿改模板）；密钥走环境变量 / `.env`（可用 `.env.example` 作模板），不进上述 JSON。
 
 ### skills/ 约定
 
@@ -99,7 +100,7 @@ Python 用 **UV** 管理（`pyproject.toml` + `uv.lock`），虚拟环境在本�
     uv sync
     .venv/bin/python scripts/whisper_openai_asr_proxy.py --help
 
-一律显式用 `.venv/bin/python`，不依赖 shell 是否 activate。`uv sync` 会装齐 SenseVoice 运行时依赖；代理启动时若仍缺包只提示再跑 `uv sync`，不会联网自动装。本机可选已编译的 whisper.cpp（`whisper-server` 与 `models/ggml-*.bin`，仅本地引擎选 Whisper 时需要）；路径、端口、模型见 `configs/proxy.json`，无参启动：`.venv/bin/python scripts/whisper_openai_asr_proxy.py`。
+一律显式用 `.venv/bin/python`，不依赖 shell 是否 activate。`uv sync` 会装齐 SenseVoice 运行时依赖；代理启动时若仍缺包只提示再跑 `uv sync`，不会联网自动装。本机可选已编译的 whisper.cpp（`whisper-server` 与 `models/ggml-*.bin`，仅本地引擎选 Whisper 时需要）；路径、端口、模型见运行时 `configs/proxy.json`（缺则从 `config-templates/` 拷入），无参启动：`.venv/bin/python scripts/whisper_openai_asr_proxy.py`。
 
 ## 能力声明
 

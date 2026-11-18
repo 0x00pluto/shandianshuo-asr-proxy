@@ -30,12 +30,17 @@ def _write_config(payload: dict) -> Path:
 
 class PremiumConfigTests(unittest.TestCase):
     def test_load_default_shape(self):
-        path = REPO_ROOT / "configs" / "premium.json"
+        path = REPO_ROOT / "config-templates" / "premium.json"
         providers = load_premium_list(path)
         self.assertEqual(len(providers), 1)
         self.assertEqual(providers[0].id, "doubao")
         self.assertEqual(providers[0].api_key_env, "DOUBAO_ASR_API_KEY")
         self.assertEqual(providers[0].timeout_sec, 12.0)
+
+    def test_load_default_bootstraps_runtime(self):
+        providers = load_premium_list()
+        self.assertTrue((REPO_ROOT / "configs" / "premium.json").is_file())
+        self.assertEqual(providers[0].id, "doubao")
 
     def test_missing_file_fails(self):
         missing = REPO_ROOT / "configs" / "premium.missing-for-test.json"

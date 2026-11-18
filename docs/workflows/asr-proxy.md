@@ -1,8 +1,8 @@
 # 启动本地转写代理（SenseVoice / Whisper 兜底）
 
-一条命令启动代理，对外提供闪电说可用的 `POST /v1/chat/completions`。本地兜底在 **SenseVoice** 与 **Whisper** 中二选一（`configs/proxy.json` → `local.engine`）；远程豆包规则见 [`specs/prds/prd-00001-dual-write.md`](../../specs/prds/prd-00001-dual-write.md)。本地引擎选择见 [`specs/prds/prd-00002-local-fallback.md`](../../specs/prds/prd-00002-local-fallback.md)。
+一条命令启动代理，对外提供闪电说可用的 `POST /v1/chat/completions`。本地兜底在 **SenseVoice** 与 **Whisper** 中二选一（运行时 `configs/proxy.json` → `local.engine`）；远程豆包规则见 [`specs/prds/prd-00001-dual-write.md`](../../specs/prds/prd-00001-dual-write.md)。本地引擎选择见 [`specs/prds/prd-00002-local-fallback.md`](../../specs/prds/prd-00002-local-fallback.md)。
 
-默认对外端口 **18888**（`proxy.json` 的 `port`）。
+默认对外端口 **18888**（`proxy.json` 的 `port`）。首次启动若尚 `configs/`，会从 [`config-templates/`](../../config-templates/) 拷入。
 
 ## 入口
 
@@ -22,8 +22,9 @@ uv sync
 
 | 文件 | 入库 | 说明 |
 |---|---|---|
-| [`configs/proxy.json`](../../configs/proxy.json) | 是 | `bind_host`、`port`（默认 18888）、`local`（引擎意图）、whisper 路径/超时、日志 |
-| [`configs/premium.json`](../../configs/premium.json) | 是 | 高级模型列表（无密钥；`api_key_env` 为变量名） |
+| [`config-templates/proxy.json`](../../config-templates/proxy.json) | 是 | 出厂默认：端口、`local`、whisper、日志 |
+| [`config-templates/premium.json`](../../config-templates/premium.json) | 是 | 出厂高级模型列表（无密钥；`api_key_env` 为变量名） |
+| `configs/proxy.json` / `configs/premium.json` | 否（整夹 gitignore） | 运行时；缺则从 templates 拷入；探测结果写回 proxy |
 | [`.env.example`](../../.env.example) → `.env` | 模板是 / `.env` 否 | 豆包密钥 `DOUBAO_ASR_API_KEY` |
 
 ### `local.engine`

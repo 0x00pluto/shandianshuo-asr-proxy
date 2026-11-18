@@ -36,6 +36,8 @@ cp .env.example .env
 # 编辑 .env，填入 DOUBAO_ASR_API_KEY=…
 ```
 
+行为配置：出厂默认在 [`config-templates/`](config-templates/)；首次启动会拷到本仓 [`configs/`](configs/)（该目录不入库，可改可写回）。改分发默认请改 templates；本机调端口/Whisper 路径请改 `configs/`。
+
 启动：
 
 ```bash

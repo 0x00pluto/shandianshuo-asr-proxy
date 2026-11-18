@@ -1,5 +1,6 @@
 """读取 configs/premium.json，并按环境变量挑出当前高级模型。
 
+出厂默认在 config-templates/；首次缺失时拷入 configs/。
 密钥只来自环境变量名（配置里的 api_key_env），不读配置文件里的明文密钥。
 """
 
@@ -10,6 +11,8 @@ import os
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable, Mapping
+
+from .config_bootstrap import ensure_runtime_configs, runtime_dir
 
 REQUIRED_FIELDS = ("id", "endpoint", "resource_id", "api_key_env", "timeout_sec")
 IMPLEMENTED_IDS = frozenset({"doubao"})
@@ -31,7 +34,7 @@ class ActivePremium:
 
 
 def default_config_path() -> Path:
-    return Path(__file__).resolve().parents[2] / "configs" / "premium.json"
+    return runtime_dir() / "premium.json"
 
 
 def load_premium_list(
@@ -39,7 +42,11 @@ def load_premium_list(
     *,
     read_text: Callable[[Path], str] | None = None,
 ) -> list[PremiumProvider]:
-    path = config_path or default_config_path()
+    if config_path is None:
+        ensure_runtime_configs()
+        path = default_config_path()
+    else:
+        path = config_path
     reader = read_text or (lambda p: p.read_text(encoding="utf-8"))
     try:
         raw = reader(path)

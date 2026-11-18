@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """一条命令拉起 whisper-server，并把闪电说的 Chat Completions ASR 转成 /inference。
 
-行为配置见 configs/proxy.json 与 configs/premium.json；密钥见本机 .env。
+行为配置：出厂见 config-templates/，运行时见 configs/（缺则拷入）；密钥见本机 .env。
 对外监听 bind_host:port，whisper-server 固定绑在 port+1。
 """
 

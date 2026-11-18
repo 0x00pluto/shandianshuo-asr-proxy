@@ -26,7 +26,7 @@ def _write_config(payload: dict) -> Path:
 
 class ProxyConfigTests(unittest.TestCase):
     def test_load_default_shape(self):
-        path = REPO_ROOT / "configs" / "proxy.json"
+        path = REPO_ROOT / "config-templates" / "proxy.json"
         raw = json.loads(path.read_text(encoding="utf-8"))
         config = load_proxy_config(path)
         self.assertEqual(config.bind_host, raw["bind_host"])
@@ -41,6 +41,14 @@ class ProxyConfigTests(unittest.TestCase):
         )
         self.assertTrue(str(config.whisper.bin).endswith("whisper-server"))
         self.assertEqual(config.local.engine, raw["local"]["engine"])
+        self.assertEqual(config.local.engine, "auto")
+
+    def test_load_default_bootstraps_runtime(self):
+        config = load_proxy_config()
+        runtime = REPO_ROOT / "configs" / "proxy.json"
+        self.assertTrue(runtime.is_file())
+        self.assertEqual(config.config_path.resolve(), runtime.resolve())
+        self.assertEqual(config.port, 18888)
         self.assertEqual(config.local.engine, "auto")
 
     def test_missing_field_fails(self):

@@ -13,8 +13,9 @@
 - `docs/memos/memo-wiki-index.md`: Memo 索引（不计入五位序号）；下一号 00001
 - `docs/workflows/asr-proxy.md`: 无参启动转写代理（SenseVoice/Whisper 二选一本地兜底）；默认端口 18888；结构化日志见 `temp/logs/asr-proxy.log`
 - `.env.example`: 豆包密钥环境变量模板（入库）；本机复制为 gitignore 的 `.env`
-- `configs/proxy.json`: 对外端口（默认 18888）、local 引擎意图、whisper 路径/超时、日志（入库）
-- `configs/premium.json`: 高级模型出厂行为配置（入库，无密钥）
+- `config-templates/proxy.json`: 出厂代理配置模板（入库）；运行时拷到 `configs/proxy.json`
+- `config-templates/premium.json`: 出厂高级模型列表模板（入库，无密钥）
+- `configs/`: 运行时配置目录（整夹 gitignore；首次从 config-templates 拷入）
 - `docs/faqs/`: 一次踩坑 FAQ；记录与检索用技能 `huyuan-ai-dev-faq-assistant`
 - `docs/faqs/how-to-fix-sensevoice-deps-with-uv-sync.md`: SenseVoice 依赖用 `uv sync` 一条装齐；启动不自动装包
 - `docs/faqs/how-to-fill-shandianshuo-when-config-not-written.md`: 闪电说配置「未写入」时按摘要四项手填 Chat 音频

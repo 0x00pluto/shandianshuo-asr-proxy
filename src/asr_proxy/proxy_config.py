@@ -1,5 +1,6 @@
 """读取 configs/proxy.json：对外端口、主机、local 引擎意图与 whisper 路径/超时。
 
+出厂默认在 config-templates/；首次缺失时拷入 configs/（见 config_bootstrap）。
 whisper 内部端口固定为 port+1，不单独配置；仅在解析为 Whisper 时才启动。
 """
 
@@ -9,6 +10,8 @@ import json
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable
+
+from .config_bootstrap import ensure_runtime_configs, runtime_dir
 
 REQUIRED_TOP = ("bind_host", "port", "whisper")
 REQUIRED_WHISPER = (
@@ -69,7 +72,7 @@ class ProxyConfig:
 
 
 def default_config_path() -> Path:
-    return Path(__file__).resolve().parents[2] / "configs" / "proxy.json"
+    return runtime_dir() / "proxy.json"
 
 
 def load_proxy_config(
@@ -77,7 +80,11 @@ def load_proxy_config(
     *,
     read_text: Callable[[Path], str] | None = None,
 ) -> ProxyConfig:
-    path = config_path or default_config_path()
+    if config_path is None:
+        ensure_runtime_configs()
+        path = default_config_path()
+    else:
+        path = config_path
     reader = read_text or (lambda p: p.read_text(encoding="utf-8"))
     try:
         raw = reader(path)
@@ -110,7 +117,7 @@ def load_proxy_config(
             f"whisper 缺少字段 {', '.join(whisper_missing)}：{path}"
         )
 
-    root = _as_path(whisper_raw["root"], "whisper.root", path)
+    root = _as_path_allow_empty(whisper_raw["root"], "whisper.root", path)
     bin_rel = _as_nonempty_str(whisper_raw["bin"], "whisper.bin", path)
     models_rel = _as_nonempty_str(whisper_raw["models_dir"], "whisper.models_dir", path)
     model = _as_nonempty_str(whisper_raw["model"], "whisper.model", path)
@@ -251,6 +258,16 @@ def _as_path(value: Any, label: str, path: Path) -> Path:
     return Path(text).expanduser()
 
 
+def _as_path_allow_empty(value: Any, label: str, path: Path) -> Path:
+    """whisper.root 可为空（未装 Whisper 时）；空则不拼绝对路径。"""
+    if not isinstance(value, str):
+        raise SystemExit(f"{label} 必须是字符串：{path}")
+    text = value.strip()
+    if not text:
+        return Path()
+    return Path(text).expanduser()
+
+
 def _as_positive_number(value: Any, label: str, path: Path) -> float:
     if not isinstance(value, (int, float)) or isinstance(value, bool) or value <= 0:
         raise SystemExit(f"{label} 必须是正数：{path}")
@@ -260,5 +277,8 @@ def _as_positive_number(value: Any, label: str, path: Path) -> float:
 def _resolve_under_root(root: Path, relative_or_abs: str) -> Path:
     candidate = Path(relative_or_abs).expanduser()
     if candidate.is_absolute():
+        return candidate
+    # Path("") 在 pathlib 里等于 "."；未配置 root 时保持相对路径，勿 resolve 到 cwd
+    if str(root) in ("", "."):
         return candidate
     return (root / candidate).resolve()
