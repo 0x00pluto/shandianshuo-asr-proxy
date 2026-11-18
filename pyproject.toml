@@ -1,0 +1,14 @@
+[project]
+name = "asr-proxy"
+version = "0.2.0"
+description = "闪电说本地转写代理：SenseVoice / Whisper 兜底 + 豆包双写"
+requires-python = ">=3.11"
+dependencies = [
+  "onnxruntime",
+  "numpy",
+  "kaldi-native-fbank",
+  "rich",
+]
+
+[tool.uv]
+package = false

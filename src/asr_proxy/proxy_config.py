@@ -1,6 +1,6 @@
-"""读取 configs/proxy.json：对外端口、主机与 whisper 路径/超时。
+"""读取 configs/proxy.json：对外端口、主机、local 引擎意图与 whisper 路径/超时。
 
-whisper 内部端口固定为 port+1，不单独配置。
+whisper 内部端口固定为 port+1，不单独配置；仅在解析为 Whisper 时才启动。
 """
 
 from __future__ import annotations
@@ -20,6 +20,8 @@ REQUIRED_WHISPER = (
     "ready_timeout_sec",
     "inference_timeout_sec",
 )
+REQUIRED_LOGGING = ("dir", "file", "max_bytes", "backup_count")
+ALLOWED_ENGINES = frozenset({"auto", "sensevoice", "whisper", "off"})
 
 
 @dataclass(frozen=True)
@@ -34,10 +36,32 @@ class WhisperConfig:
 
 
 @dataclass(frozen=True)
+class LoggingConfig:
+    dir: Path
+    file: str
+    max_bytes: int
+    backup_count: int
+
+
+@dataclass(frozen=True)
+class LocalConfig:
+    """用户意图（engine）与可选 SenseVoice 覆盖路径；last_resolved 为观测写回。"""
+
+    engine: str
+    sensevoice_model_dir: str
+    last_resolved_engine: str
+    last_resolved_model_dir: str
+    last_resolved_skip_reason: str
+
+
+@dataclass(frozen=True)
 class ProxyConfig:
     bind_host: str
     port: int
     whisper: WhisperConfig
+    logging: LoggingConfig
+    local: LocalConfig
+    config_path: Path
 
     @property
     def internal_port(self) -> int:
@@ -100,6 +124,8 @@ def load_proxy_config(
 
     bin_path = _resolve_under_root(root, bin_rel)
     models_dir = _resolve_under_root(root, models_rel)
+    logging_cfg = _parse_logging(data.get("logging"), path)
+    local_cfg = _parse_local(data.get("local"), path)
 
     return ProxyConfig(
         bind_host=bind_host.strip(),
@@ -113,6 +139,104 @@ def load_proxy_config(
             ready_timeout_sec=ready,
             inference_timeout_sec=inference,
         ),
+        logging=logging_cfg,
+        local=local_cfg,
+        config_path=path.resolve() if path.exists() else path,
+    )
+
+
+def _parse_local(raw: Any, path: Path) -> LocalConfig:
+    if raw is None:
+        return LocalConfig(
+            engine="auto",
+            sensevoice_model_dir="",
+            last_resolved_engine="off",
+            last_resolved_model_dir="",
+            last_resolved_skip_reason="",
+        )
+    if not isinstance(raw, dict):
+        raise SystemExit(f"local 必须是对象：{path}")
+
+    engine = raw.get("engine", "auto")
+    if not isinstance(engine, str) or engine.strip() not in ALLOWED_ENGINES:
+        raise SystemExit(
+            f"local.engine 必须是 {', '.join(sorted(ALLOWED_ENGINES))}：{path}"
+        )
+    engine = engine.strip()
+
+    sense_raw = raw.get("sensevoice")
+    model_dir = ""
+    if sense_raw is None:
+        model_dir = ""
+    elif isinstance(sense_raw, dict):
+        value = sense_raw.get("model_dir", "")
+        if value is None:
+            model_dir = ""
+        elif isinstance(value, str):
+            model_dir = value.strip()
+        else:
+            raise SystemExit(f"local.sensevoice.model_dir 必须是字符串：{path}")
+    else:
+        raise SystemExit(f"local.sensevoice 必须是对象：{path}")
+
+    last = raw.get("last_resolved")
+    last_engine = "off"
+    last_dir = ""
+    last_reason = ""
+    if last is None:
+        pass
+    elif isinstance(last, dict):
+        le = last.get("engine", "off")
+        if isinstance(le, str) and le.strip():
+            last_engine = le.strip()
+        ld = last.get("model_dir", "")
+        if isinstance(ld, str):
+            last_dir = ld.strip()
+        lr = last.get("skip_reason", "")
+        if isinstance(lr, str):
+            last_reason = lr.strip()
+    else:
+        raise SystemExit(f"local.last_resolved 必须是对象：{path}")
+
+    return LocalConfig(
+        engine=engine,
+        sensevoice_model_dir=model_dir,
+        last_resolved_engine=last_engine,
+        last_resolved_model_dir=last_dir,
+        last_resolved_skip_reason=last_reason,
+    )
+
+
+def _parse_logging(raw: Any, path: Path) -> LoggingConfig:
+    if raw is None:
+        return LoggingConfig(
+            dir=Path("temp/logs"),
+            file="asr-proxy.log",
+            max_bytes=2097152,
+            backup_count=5,
+        )
+    if not isinstance(raw, dict):
+        raise SystemExit(f"logging 必须是对象：{path}")
+    missing = [name for name in REQUIRED_LOGGING if name not in raw]
+    if missing:
+        raise SystemExit(f"logging 缺少字段 {', '.join(missing)}：{path}")
+    log_dir = _as_nonempty_str(raw["dir"], "logging.dir", path)
+    log_file = _as_nonempty_str(raw["file"], "logging.file", path)
+    max_bytes = raw["max_bytes"]
+    backup_count = raw["backup_count"]
+    if not isinstance(max_bytes, int) or isinstance(max_bytes, bool) or max_bytes <= 0:
+        raise SystemExit(f"logging.max_bytes 必须是正整数：{path}")
+    if (
+        not isinstance(backup_count, int)
+        or isinstance(backup_count, bool)
+        or backup_count < 0
+    ):
+        raise SystemExit(f"logging.backup_count 必须是非负整数：{path}")
+    return LoggingConfig(
+        dir=Path(log_dir),
+        file=log_file,
+        max_bytes=max_bytes,
+        backup_count=backup_count,
     )
 
 

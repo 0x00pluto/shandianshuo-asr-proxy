@@ -94,12 +94,12 @@
 
 ## 环境
 
-Python 用 **UV** 管理，虚拟环境在本仓 `.venv/`：
+Python 用 **UV** 管理（`pyproject.toml` + `uv.lock`），虚拟环境在本仓 `.venv/`：
 
-    uv venv
+    uv sync
     .venv/bin/python scripts/whisper_openai_asr_proxy.py --help
 
-一律显式用 `.venv/bin/python`，不依赖 shell 是否 activate。当前代理只用标准库，无需额外 pip 依赖。本机需已编译的 whisper.cpp（`whisper-server` 与 `models/ggml-*.bin`）；路径、端口、模型见 `configs/proxy.json`，无参启动：`.venv/bin/python scripts/whisper_openai_asr_proxy.py`。
+一律显式用 `.venv/bin/python`，不依赖 shell 是否 activate。`uv sync` 会装齐 SenseVoice 运行时依赖；代理启动时若仍缺包只提示再跑 `uv sync`，不会联网自动装。本机可选已编译的 whisper.cpp（`whisper-server` 与 `models/ggml-*.bin`，仅本地引擎选 Whisper 时需要）；路径、端口、模型见 `configs/proxy.json`，无参启动：`.venv/bin/python scripts/whisper_openai_asr_proxy.py`。
 
 ## 能力声明
 

@@ -39,6 +39,8 @@ class SelectTests(unittest.TestCase):
         self.assertTrue(started["premium"])
         self.assertEqual(result.outcome, DualOutcome.PREMIUM_CHOSEN)
         self.assertEqual(result.text, "premium-text")
+        self.assertIsNotNone(result.premium_ms)
+        self.assertGreaterEqual(result.premium_ms, 0)
 
     def test_empty_premium_text_is_kept(self):
         def local(_wav, _lang):
@@ -90,7 +92,12 @@ class SelectTests(unittest.TestCase):
             return "local-text"
 
         def premium(_wav, _lang):
-            raise PremiumFailure("timeout", "timed out")
+            raise PremiumFailure(
+                "timeout",
+                "timed out",
+                stage="recv",
+                diag={"stage": "recv", "peer": "1.2.3.4", "err": "timed out"},
+            )
 
         result = run_dual(
             b"RIFF",
@@ -102,6 +109,35 @@ class SelectTests(unittest.TestCase):
         self.assertEqual(result.outcome, DualOutcome.LOCAL_CHOSEN)
         self.assertEqual(result.text, "local-text")
         self.assertEqual(result.failure_kind, "timeout")
+        self.assertIsNotNone(result.premium_ms)
+        self.assertIsNotNone(result.local_ms)
+        self.assertIsNotNone(result.premium_diag)
+        self.assertEqual(result.premium_diag.get("stage"), "recv")
+        self.assertEqual(result.premium_diag.get("peer"), "1.2.3.4")
+
+    def test_premium_tuple_diag_on_success(self):
+        def local(_wav, _lang):
+            return "local-text"
+
+        def premium(_wav, _lang):
+            return "premium-text", {
+                "stage": "done",
+                "peer": "9.9.9.9",
+                "connect_ms": 12.5,
+                "recognize_ms": 80.0,
+            }
+
+        result = run_dual(
+            b"RIFF",
+            "zh",
+            local_transcribe=local,
+            premium_transcribe=premium,
+            premium_provider="doubao",
+        )
+        self.assertEqual(result.outcome, DualOutcome.PREMIUM_CHOSEN)
+        self.assertEqual(result.text, "premium-text")
+        self.assertEqual(result.premium_diag.get("stage"), "done")
+        self.assertEqual(result.premium_diag.get("peer"), "9.9.9.9")
 
     def test_premium_auth_falls_back_to_local(self):
         def local(_wav, _lang):
@@ -150,6 +186,8 @@ class SelectTests(unittest.TestCase):
         self.assertEqual(result.outcome, DualOutcome.LOCAL_CHOSEN)
         self.assertEqual(result.text, "local-only")
         self.assertIsNone(result.provider)
+        self.assertIsNone(result.premium_ms)
+        self.assertIsNotNone(result.local_ms)
 
 
 if __name__ == "__main__":

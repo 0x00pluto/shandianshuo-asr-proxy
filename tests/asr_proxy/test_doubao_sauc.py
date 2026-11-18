@@ -159,7 +159,7 @@ class DoubaoSaucUnitTests(unittest.TestCase):
 
         thread = threading.Thread(target=serve, daemon=True)
         thread.start()
-        text = recognize_wav(
+        text, diag = recognize_wav(
             b"RIFF....WAVE",
             "zh",
             api_key="test-key",
@@ -172,6 +172,13 @@ class DoubaoSaucUnitTests(unittest.TestCase):
         server.close()
         self.assertEqual(errors, [])
         self.assertEqual(text, "豆包结果")
+        self.assertEqual(diag.get("stage"), "done")
+        self.assertEqual(diag.get("peer"), "127.0.0.1")
+        self.assertIsNotNone(diag.get("dns_ms"))
+        self.assertIsNotNone(diag.get("connect_ms"))
+        self.assertIsNotNone(diag.get("recognize_ms"))
+        self.assertIsNotNone(diag.get("request_id"))
+        self.assertIsNotNone(diag.get("connect_id"))
 
     def test_auth_401(self):
         server = socket.socket()
@@ -202,6 +209,10 @@ class DoubaoSaucUnitTests(unittest.TestCase):
         thread.join(timeout=2)
         server.close()
         self.assertEqual(ctx.exception.kind, "auth")
+        self.assertEqual(ctx.exception.stage, "ws_handshake")
+        self.assertIsInstance(ctx.exception.diag, dict)
+        self.assertEqual(ctx.exception.diag.get("stage"), "ws_handshake")
+        self.assertIn("401", ctx.exception.diag.get("err", ""))
 
 
 if __name__ == "__main__":

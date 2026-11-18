@@ -42,30 +42,65 @@ def recognize_wav(
     resource_id: str,
     timeout_sec: float,
     connect: Callable[..., "WebSocketClient"] | None = None,
-) -> str:
-    """整段 WAV 一句话识别；成功返回 result.text（可为空字符串）。"""
+) -> tuple[str, dict]:
+    """整段 WAV 一句话识别；返回 (text, diag)。text 可为空字符串。"""
     deadline = time.monotonic() + timeout_sec
     connector = connect or WebSocketClient.connect
+    request_id = str(uuid.uuid4())
+    connect_id = str(uuid.uuid4())
+    diag = _new_diag(request_id=request_id, connect_id=connect_id)
     headers = {
         "X-Api-Key": api_key,
         "X-Api-Resource-Id": resource_id,
-        "X-Api-Request-Id": str(uuid.uuid4()),
-        "X-Api-Connect-Id": str(uuid.uuid4()),
+        "X-Api-Request-Id": request_id,
+        "X-Api-Connect-Id": connect_id,
     }
     try:
-        ws = connector(endpoint, headers=headers, timeout_sec=_remaining(deadline))
-    except PremiumFailure:
-        raise
+        if connect is None or connect is WebSocketClient.connect:
+            ws = WebSocketClient.connect(
+                endpoint, headers=headers, timeout_sec=_remaining(deadline), diag=diag
+            )
+        else:
+            connect_started = time.monotonic()
+            try:
+                ws = connector(
+                    endpoint,
+                    headers=headers,
+                    timeout_sec=_remaining(deadline),
+                    diag=diag,
+                )
+            except TypeError:
+                ws = connector(
+                    endpoint, headers=headers, timeout_sec=_remaining(deadline)
+                )
+            if diag.get("connect_ms") is None:
+                diag["connect_ms"] = _elapsed_ms(connect_started)
+            if diag.get("stage") in {None, "unknown"}:
+                diag["stage"] = "ws_handshake"
+    except PremiumFailure as exc:
+        raise _with_diag(exc, diag) from exc
     except Exception as exc:  # noqa: BLE001
-        raise PremiumFailure("network", f"连接豆包失败：{exc}") from exc
+        raise _fail("network", f"连接豆包失败：{exc}", diag, stage="unknown") from exc
 
     try:
-        # full client 占用 sequence=1；随后音频包从 2 起算。
-        # 整段一次发完时末包必须为 -2，否则服务端报 sequence mismatch。
-        ws.send_binary(build_full_client(language_to_doubao(language)))
-        _recv_until_server(ws, deadline, expect_text=False)
-        ws.send_binary(build_audio_only(wav, seq=2, last=True))
-        return _recv_until_final_text(ws, deadline)
+        recognize_started = time.monotonic()
+        try:
+            diag["stage"] = "full_client"
+            # full client 占用 sequence=1；随后音频包从 2 起算。
+            # 整段一次发完时末包必须为 -2，否则服务端报 sequence mismatch。
+            ws.send_binary(build_full_client(language_to_doubao(language)))
+            _recv_until_server(ws, deadline, expect_text=False)
+            diag["stage"] = "audio_send"
+            ws.send_binary(build_audio_only(wav, seq=2, last=True))
+            diag["stage"] = "recv"
+            text = _recv_until_final_text(ws, deadline)
+            diag["recognize_ms"] = _elapsed_ms(recognize_started)
+            diag["stage"] = "done"
+            diag["err"] = None
+            return text, dict(diag)
+        except PremiumFailure as exc:
+            diag["recognize_ms"] = _elapsed_ms(recognize_started)
+            raise _with_diag(exc, diag) from exc
     finally:
         ws.close()
 
@@ -128,7 +163,7 @@ def build_audio_only(chunk: bytes, *, seq: int, last: bool) -> bytes:
 
 def parse_sauc_frame(data: bytes) -> tuple[str, int | None, int, object]:
     if len(data) < 4:
-        raise PremiumFailure("protocol", "豆包响应帧过短")
+        raise PremiumFailure("protocol", "豆包响应帧过短", stage="recv")
     header_size = (data[0] & 0x0F) * 4
     msg_type = data[1] >> 4
     flags = data[1] & 0x0F
@@ -137,7 +172,7 @@ def parse_sauc_frame(data: bytes) -> tuple[str, int | None, int, object]:
 
     if msg_type == ERROR_RESP:
         if len(rest) < 8:
-            raise PremiumFailure("protocol", "豆包错误帧过短")
+            raise PremiumFailure("protocol", "豆包错误帧过短", stage="recv")
         code = struct.unpack(">I", rest[:4])[0]
         size = struct.unpack(">I", rest[4:8])[0]
         payload = rest[8 : 8 + size]
@@ -147,30 +182,40 @@ def parse_sauc_frame(data: bytes) -> tuple[str, int | None, int, object]:
             except OSError:
                 pass
         message = payload.decode("utf-8", "replace")
-        raise PremiumFailure("protocol", f"豆包错误 {code}: {message}")
+        raise PremiumFailure(
+            "protocol", f"豆包错误 {code}: {message}", stage="recv"
+        )
 
     if msg_type == FULL_SERVER:
         seq = None
         if flags & 0b0001:
             if len(rest) < 4:
-                raise PremiumFailure("protocol", "豆包响应缺少 sequence")
+                raise PremiumFailure(
+                    "protocol", "豆包响应缺少 sequence", stage="recv"
+                )
             seq = struct.unpack(">i", rest[:4])[0]
             rest = rest[4:]
         if len(rest) < 4:
-            raise PremiumFailure("protocol", "豆包响应缺少 payload size")
+            raise PremiumFailure(
+                "protocol", "豆包响应缺少 payload size", stage="recv"
+            )
         size = struct.unpack(">I", rest[:4])[0]
         body = rest[4 : 4 + size]
         if compression == GZIP and body:
             try:
                 body = gzip.decompress(body)
             except OSError as exc:
-                raise PremiumFailure("protocol", f"豆包响应无法解压：{exc}") from exc
+                raise PremiumFailure(
+                    "protocol", f"豆包响应无法解压：{exc}", stage="recv"
+                ) from exc
         if not body:
             return ("SERVER", seq, flags, {})
         try:
             obj = json.loads(body.decode("utf-8"))
         except (UnicodeDecodeError, json.JSONDecodeError) as exc:
-            raise PremiumFailure("protocol", f"豆包响应不是 JSON：{exc}") from exc
+            raise PremiumFailure(
+                "protocol", f"豆包响应不是 JSON：{exc}", stage="recv"
+            ) from exc
         return ("SERVER", seq, flags, obj)
 
     return ("OTHER", None, flags, data[:16].hex())
@@ -205,8 +250,50 @@ def _sauc_header(msg_type: int, flags: int, serial: int, compression: int) -> by
 def _remaining(deadline: float) -> float:
     left = deadline - time.monotonic()
     if left <= 0:
-        raise PremiumFailure("timeout", "豆包识别超时")
+        raise PremiumFailure("timeout", "豆包识别超时", stage="recv")
     return left
+
+
+def _elapsed_ms(started: float) -> float:
+    return round((time.monotonic() - started) * 1000.0, 1)
+
+
+def _new_diag(*, request_id: str, connect_id: str) -> dict:
+    return {
+        "stage": "unknown",
+        "peer": None,
+        "dns_ms": None,
+        "connect_ms": None,
+        "recognize_ms": None,
+        "request_id": request_id,
+        "connect_id": connect_id,
+        "err": None,
+    }
+
+
+def _fail(
+    kind: str,
+    message: str,
+    diag: dict,
+    *,
+    stage: str,
+) -> PremiumFailure:
+    merged = dict(diag)
+    merged["stage"] = stage
+    merged["err"] = message
+    return PremiumFailure(kind, message, stage=stage, diag=merged)
+
+
+def _with_diag(exc: PremiumFailure, diag: dict) -> PremiumFailure:
+    stage = exc.stage if exc.stage and exc.stage != "unknown" else (
+        diag.get("stage") or "unknown"
+    )
+    merged = dict(diag)
+    if isinstance(exc.diag, dict):
+        merged.update({k: v for k, v in exc.diag.items() if v is not None})
+    merged["stage"] = stage
+    merged["err"] = str(exc)
+    return PremiumFailure(exc.kind, str(exc), stage=stage, diag=merged)
 
 
 def _recv_until_server(
@@ -260,30 +347,65 @@ class WebSocketClient:
         *,
         headers: dict[str, str],
         timeout_sec: float,
+        diag: dict | None = None,
     ) -> "WebSocketClient":
+        d = diag if diag is not None else {}
         parsed = urlparse(endpoint)
         if parsed.scheme not in {"wss", "ws"}:
-            raise PremiumFailure("protocol", f"不支持的 endpoint：{endpoint}")
+            raise PremiumFailure(
+                "protocol",
+                f"不支持的 endpoint：{endpoint}",
+                stage="unknown",
+                diag={**d, "stage": "unknown", "err": f"不支持的 endpoint：{endpoint}"},
+            )
         host = parsed.hostname
         if not host:
-            raise PremiumFailure("protocol", f"endpoint 缺少主机名：{endpoint}")
+            raise PremiumFailure(
+                "protocol",
+                f"endpoint 缺少主机名：{endpoint}",
+                stage="unknown",
+                diag={**d, "stage": "unknown", "err": f"endpoint 缺少主机名：{endpoint}"},
+            )
         port = parsed.port or (443 if parsed.scheme == "wss" else 80)
         path = parsed.path or "/"
         if parsed.query:
             path = f"{path}?{parsed.query}"
 
-        raw = socket.create_connection((host, port), timeout=timeout_sec)
-        raw.settimeout(timeout_sec)
+        d["stage"] = "dns"
+        dns_started = time.monotonic()
+        try:
+            infos = socket.getaddrinfo(host, port, type=socket.SOCK_STREAM)
+        except OSError as exc:
+            raise _fail("network", f"DNS 解析失败：{exc}", d, stage="dns") from exc
+        if not infos:
+            raise _fail("network", "DNS 解析无结果", d, stage="dns")
+        d["dns_ms"] = _elapsed_ms(dns_started)
+
+        family, socktype, proto, _canon, sockaddr = infos[0]
+        peer_ip = sockaddr[0]
+        d["peer"] = peer_ip
+
+        connect_started = time.monotonic()
+        d["stage"] = "tcp"
+        try:
+            raw = socket.socket(family, socktype, proto)
+            raw.settimeout(timeout_sec)
+            raw.connect(sockaddr)
+        except OSError as exc:
+            raise _fail("network", f"TCP 连接失败：{exc}", d, stage="tcp") from exc
+
         if parsed.scheme == "wss":
+            d["stage"] = "tls"
             context = ssl.create_default_context()
             try:
                 sock = context.wrap_socket(raw, server_hostname=host)
             except ssl.SSLError as exc:
                 raw.close()
-                raise PremiumFailure("network", f"TLS 握手失败：{exc}") from exc
+                raise _fail("network", f"TLS 握手失败：{exc}", d, stage="tls") from exc
         else:
             sock = raw
 
+        d["stage"] = "ws_handshake"
         key = base64.b64encode(os.urandom(16)).decode("ascii")
         request_lines = [
             f"GET {path} HTTP/1.1",
@@ -300,24 +422,35 @@ class WebSocketClient:
         try:
             sock.sendall("\r\n".join(request_lines).encode("utf-8"))
             response = _read_http_response(sock, timeout_sec)
-        except PremiumFailure:
+        except PremiumFailure as exc:
             sock.close()
-            raise
+            raise _with_diag(
+                PremiumFailure(exc.kind, str(exc), stage="ws_handshake"), d
+            ) from exc
         except Exception as exc:  # noqa: BLE001
             sock.close()
-            raise PremiumFailure("network", f"WebSocket 握手失败：{exc}") from exc
+            raise _fail(
+                "network", f"WebSocket 握手失败：{exc}", d, stage="ws_handshake"
+            ) from exc
 
         status_line = response.split(b"\r\n", 1)[0].decode("latin1", "replace")
         parts = status_line.split(" ", 2)
         status = int(parts[1]) if len(parts) >= 2 and parts[1].isdigit() else 0
         if status in {401, 403}:
             sock.close()
-            raise PremiumFailure("auth", f"豆包鉴权失败：HTTP {status}")
+            raise _fail(
+                "auth",
+                f"豆包鉴权失败：HTTP {status}",
+                d,
+                stage="ws_handshake",
+            )
         if status != 101:
             sock.close()
-            raise PremiumFailure(
+            raise _fail(
                 "network" if status == 0 else "protocol",
                 f"WebSocket 握手失败：{status_line}",
+                d,
+                stage="ws_handshake",
             )
 
         expected = base64.b64encode(
@@ -326,7 +459,13 @@ class WebSocketClient:
         accept = _header_value(response, "Sec-WebSocket-Accept")
         if accept != expected:
             sock.close()
-            raise PremiumFailure("protocol", "Sec-WebSocket-Accept 不匹配")
+            raise _fail(
+                "protocol",
+                "Sec-WebSocket-Accept 不匹配",
+                d,
+                stage="ws_handshake",
+            )
+        d["connect_ms"] = _elapsed_ms(connect_started)
         return cls(sock)
 
     def send_binary(self, payload: bytes) -> None:
@@ -342,12 +481,18 @@ class WebSocketClient:
             if opcode == 0xA:
                 continue
             if opcode == 0x8:
-                raise PremiumFailure("network", "豆包 WebSocket 已关闭")
+                raise PremiumFailure(
+                    "network", "豆包 WebSocket 已关闭", stage="recv"
+                )
             if opcode == 0x2:
                 return payload
             if opcode == 0x1:
-                raise PremiumFailure("protocol", "收到文本帧，期望二进制帧")
-            raise PremiumFailure("protocol", f"未支持的 WebSocket opcode：{opcode}")
+                raise PremiumFailure(
+                    "protocol", "收到文本帧，期望二进制帧", stage="recv"
+                )
+            raise PremiumFailure(
+                "protocol", f"未支持的 WebSocket opcode：{opcode}", stage="recv"
+            )
 
     def close(self) -> None:
         if self._closed:
@@ -381,7 +526,10 @@ class WebSocketClient:
         try:
             self._sock.sendall(header + masked)
         except OSError as exc:
-            raise PremiumFailure("network", f"发送失败：{exc}") from exc
+            # stage 由调用方当前 diag 决定（full_client / audio_send）
+            raise PremiumFailure(
+                "network", f"发送失败：{exc}", stage="unknown"
+            ) from exc
 
     def _recv_frame(self, timeout_sec: float) -> tuple[int, bytes]:
         deadline = time.monotonic() + timeout_sec
@@ -407,11 +555,17 @@ class WebSocketClient:
             try:
                 chunk = self._sock.recv(65536)
             except socket.timeout as exc:
-                raise PremiumFailure("timeout", "豆包识别超时") from exc
+                raise PremiumFailure(
+                    "timeout", "豆包识别超时", stage="recv"
+                ) from exc
             except OSError as exc:
-                raise PremiumFailure("network", f"接收失败：{exc}") from exc
+                raise PremiumFailure(
+                    "network", f"接收失败：{exc}", stage="recv"
+                ) from exc
             if not chunk:
-                raise PremiumFailure("network", "连接在读帧时关闭")
+                raise PremiumFailure(
+                    "network", "连接在读帧时关闭", stage="recv"
+                )
             self._buffer.extend(chunk)
         data = bytes(self._buffer[:size])
         del self._buffer[:size]
@@ -427,14 +581,22 @@ def _read_http_response(sock: socket.socket, timeout_sec: float) -> bytes:
         try:
             chunk = sock.recv(4096)
         except socket.timeout as exc:
-            raise PremiumFailure("timeout", "WebSocket 握手超时") from exc
+            raise PremiumFailure(
+                "timeout", "WebSocket 握手超时", stage="ws_handshake"
+            ) from exc
         except OSError as exc:
-            raise PremiumFailure("network", f"WebSocket 握手读失败：{exc}") from exc
+            raise PremiumFailure(
+                "network", f"WebSocket 握手读失败：{exc}", stage="ws_handshake"
+            ) from exc
         if not chunk:
-            raise PremiumFailure("network", "WebSocket 握手连接关闭")
+            raise PremiumFailure(
+                "network", "WebSocket 握手连接关闭", stage="ws_handshake"
+            )
         buffer.extend(chunk)
         if len(buffer) > 65536:
-            raise PremiumFailure("protocol", "WebSocket 握手响应过长")
+            raise PremiumFailure(
+                "protocol", "WebSocket 握手响应过长", stage="ws_handshake"
+            )
     end = buffer.index(b"\r\n\r\n") + 4
     return bytes(buffer[:end])
 

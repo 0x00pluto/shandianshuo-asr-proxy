@@ -25,13 +25,27 @@ if str(SRC_ROOT) not in sys.path:
     sys.path.insert(0, str(SRC_ROOT))
 
 from asr_proxy.doubao_sauc import recognize_wav
+from asr_proxy.local_engine import (
+    ENGINE_OFF,
+    ENGINE_SENSEVOICE,
+    ENGINE_WHISPER,
+    INSTALL_HINT,
+    ResolvedLocal,
+    resolve_local_engine,
+    write_resolved_back,
+)
 from asr_proxy.premium_config import ActivePremium, load_premium_runtime
 from asr_proxy.proxy_config import ProxyConfig, default_config_path, load_proxy_config
+from asr_proxy import request_log
 from asr_proxy.select import DualOutcome, run_dual
+from asr_proxy.shandianshuo_config import align_custom_provider
+from asr_proxy.sensevoice_onnx import SenseVoiceEngine
+from asr_proxy.startup_banner import StartupStatus, print_startup_banner
 
 WAV_MIME_TYPES = {"audio/wav", "audio/x-wav", "audio/wave"}
 
 _whisper_proc = None
+_sensevoice_engine: SenseVoiceEngine | None = None
 
 
 def load_dotenv(path: Path | None = None) -> None:
@@ -62,36 +76,76 @@ def load_dotenv(path: Path | None = None) -> None:
 
 
 def main():
+    global _sensevoice_engine
     args = parse_args()
     load_dotenv()
-    config = load_proxy_config(args.config)
+    config_path = args.config or default_config_path()
+    config = load_proxy_config(config_path)
+    request_log.setup_request_logging(config.logging, REPO_ROOT)
     public_port = config.port
     internal_port = config.internal_port
-    model_path = resolve_model_path(config)
-    ensure_whisper_files(config, model_path)
+
+    resolved = resolve_local_engine(config)
+    try:
+        write_resolved_back(config.config_path, config.local, resolved)
+    except OSError as exc:
+        print(f"写回 local.last_resolved 失败（忽略）：{exc}", flush=True)
+
     _providers, active_premium = load_premium_runtime()
     if active_premium is None:
-        print(
-            "高级模型未启用（配置列表中第一家已实现提供商缺少密钥）；"
-            "本次请求只走本地 Whisper。",
-            flush=True,
-        )
+        premium_label = "未启用"
     else:
-        print(
-            f"高级模型已启用：{active_premium.provider.id}，"
-            f"超时 {active_premium.provider.timeout_sec:g} 秒",
-            flush=True,
+        premium_label = (
+            f"{active_premium.provider.id} · {active_premium.provider.timeout_sec:g}s"
         )
 
-    proc = start_whisper(config, internal_port, model_path)
-    atexit.register(stop_whisper)
-    try:
-        wait_until_ready(config, proc, internal_port)
-    except Exception:
-        stop_whisper()
-        raise
+    local_transcribe = None
+    local_detail = ""
+    hint_uv_sync = False
+    if resolved.engine == ENGINE_SENSEVOICE:
+        try:
+            _sensevoice_engine = SenseVoiceEngine(Path(resolved.model_dir))
+            engine = _sensevoice_engine
 
-    handler = make_handler(config, internal_port, active_premium)
+            def local_transcribe(wav: bytes, language: str, _engine=engine) -> str:
+                return _engine.transcribe(wav, language)
+
+        except Exception as exc:
+            print(f"SenseVoice 加载失败，本地关闭：{exc}", flush=True)
+            if INSTALL_HINT.split()[0] in str(exc) or "onnxruntime" in str(exc).lower():
+                hint_uv_sync = True
+            resolved = ResolvedLocal(
+                ENGINE_OFF, resolved.model_dir, f"sensevoice_load_failed:{exc}"
+            )
+            local_transcribe = _local_off_transcribe
+            local_detail = resolved.skip_reason
+    elif resolved.engine == ENGINE_WHISPER:
+        model_path = resolve_model_path(config)
+        ensure_whisper_files(config, model_path)
+        proc = start_whisper(config, internal_port, model_path)
+        atexit.register(stop_whisper)
+        try:
+            wait_until_ready(config, proc, internal_port)
+        except Exception:
+            stop_whisper()
+            raise
+        local_transcribe = make_whisper_transcribe(config, internal_port)
+        local_detail = model_display_name(model_path)
+    else:
+        local_transcribe = _local_off_transcribe
+        local_detail = resolved.skip_reason or ""
+        if "sensevoice_deps_missing" in local_detail:
+            hint_uv_sync = True
+
+    endpoint = f"http://{config.bind_host}:{public_port}/v1"
+    align = align_custom_provider(endpoint)
+
+    handler = make_handler(
+        config,
+        active_premium,
+        local_transcribe=local_transcribe,
+        local_engine_name=resolved.engine,
+    )
     try:
         server = ThreadingHTTPServer((config.bind_host, public_port), handler)
     except OSError as exc:
@@ -102,11 +156,15 @@ def main():
         ) from exc
 
     server.daemon_threads = True
-    model_label = model_display_name(model_path)
-    print(
-        f"对外地址 http://{config.bind_host}:{public_port}/v1  "
-        f"（whisper 在 {config.bind_host}:{internal_port}，模型 {model_label}）",
-        flush=True,
+    print_startup_banner(
+        StartupStatus(
+            endpoint=endpoint,
+            premium_label=premium_label,
+            local_engine=resolved.engine,
+            local_detail=local_detail,
+            align=align,
+            hint_uv_sync=hint_uv_sync,
+        )
     )
     try:
         server.serve_forever()
@@ -117,10 +175,35 @@ def main():
         stop_whisper()
 
 
+def _local_off_transcribe(_wav: bytes, _language: str) -> str:
+    raise RuntimeError("local_off")
+
+
+def make_whisper_transcribe(config: ProxyConfig, internal_port: int):
+    inference_url = f"http://{config.bind_host}:{internal_port}/inference"
+    inference_timeout = config.whisper.inference_timeout_sec
+
+    def local_transcribe(wav: bytes, language: str) -> str:
+        status, body, _content_type = transcribe(
+            inference_url, wav, language, inference_timeout
+        )
+        if status != 200:
+            raise RuntimeError(f"whisper-server HTTP {status}: {body[:200]!r}")
+        try:
+            text = json.loads(body.decode("utf-8")).get("text", "")
+        except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+            raise RuntimeError(f"whisper-server 返回的不是 JSON: {exc}") from exc
+        if not isinstance(text, str):
+            text = str(text)
+        return text
+
+    return local_transcribe
+
+
 def parse_args():
     parser = argparse.ArgumentParser(
         description=(
-            "按 configs/proxy.json 启动 whisper-server，"
+            "按 configs/proxy.json 启动本地兜底（SenseVoice 或 whisper-server），"
             "并提供闪电说用的 /v1/chat/completions。"
         )
     )
@@ -255,33 +338,19 @@ def wait_until_ready(config: ProxyConfig, proc, internal_port: int):
 
 def make_handler(
     config: ProxyConfig,
-    internal_port: int,
     active_premium: ActivePremium | None,
+    *,
+    local_transcribe,
+    local_engine_name: str,
 ):
-    inference_url = f"http://{config.bind_host}:{internal_port}/inference"
     default_language = config.whisper.language
-    inference_timeout = config.whisper.inference_timeout_sec
-
-    def local_transcribe(wav: bytes, language: str) -> str:
-        status, body, _content_type = transcribe(
-            inference_url, wav, language, inference_timeout
-        )
-        if status != 200:
-            raise RuntimeError(f"whisper-server HTTP {status}: {body[:200]!r}")
-        try:
-            text = json.loads(body.decode("utf-8")).get("text", "")
-        except (UnicodeDecodeError, json.JSONDecodeError) as exc:
-            raise RuntimeError(f"whisper-server 返回的不是 JSON: {exc}") from exc
-        if not isinstance(text, str):
-            text = str(text)
-        return text
 
     premium_fn = None
     premium_name = None
     if active_premium is not None:
         premium_name = active_premium.provider.id
 
-        def premium_fn(wav: bytes, language: str) -> str:
+        def premium_fn(wav: bytes, language: str):
             return recognize_wav(
                 wav,
                 language,
@@ -298,23 +367,21 @@ def make_handler(
             if self.path.split("?", 1)[0] != "/v1/chat/completions":
                 self.send_error_body(404, "not found")
                 return
+            req_id = request_log.new_request_id()
             try:
                 payload = self.read_json()
                 wav = extract_wav(payload)
                 language = language_from_payload(payload, default_language)
+                wav_sec = request_log.estimate_wav_seconds(wav)
 
-                def log_local_later(local_result: dict) -> None:
-                    if local_result.get("ok"):
-                        text_later = local_result.get("text", "")
-                        print(
-                            f"本地文本仅日志，长度 {len(text_later)}",
-                            flush=True,
+                def log_local_later(local_result: dict, rid=req_id) -> None:
+                    request_log.emit(
+                        request_log.format_local_done(
+                            req_id=rid,
+                            local_result=local_result,
+                            local_engine=local_engine_name,
                         )
-                    else:
-                        print(
-                            f"本地事后失败：{local_result.get('error')}",
-                            flush=True,
-                        )
+                    )
 
                 result = run_dual(
                     wav,
@@ -331,42 +398,28 @@ def make_handler(
                 self.send_error_body(502, f"双写转写失败: {exc}")
                 return
 
+            request_log.emit(
+                request_log.format_asr_summary(
+                    req_id=req_id,
+                    result=result,
+                    wav_bytes=len(wav),
+                    wav_sec=wav_sec,
+                    local_engine=local_engine_name,
+                )
+            )
+            if result.premium_diag:
+                request_log.emit(
+                    request_log.format_premium_diag(
+                        req_id=req_id, diag=result.premium_diag
+                    )
+                )
+
             if result.outcome is DualOutcome.FAILED:
                 message = result.error or "本地与高级模型均失败"
-                print(
-                    f"识别失败，{len(wav)} 字节 WAV，"
-                    f"provider={result.provider or '-'}，"
-                    f"failure={result.failure_kind or '-'}",
-                    flush=True,
-                )
                 self.send_error_body(502, message)
                 return
 
-            text = result.text
-            if result.outcome is DualOutcome.PREMIUM_CHOSEN:
-                print(
-                    f"识别完成（高级 {result.provider}），"
-                    f"{len(wav)} 字节 WAV，文本长度 {len(text)}",
-                    flush=True,
-                )
-                if result.local_text is not None:
-                    print(
-                        f"本地文本仅日志，长度 {len(result.local_text)}",
-                        flush=True,
-                    )
-                elif result.local_error:
-                    print(f"本地事后失败：{result.local_error}", flush=True)
-            else:
-                detail = ""
-                if result.failure_kind:
-                    detail = f"（高级失败 {result.failure_kind}，回落本地）"
-                elif premium_fn is None:
-                    detail = "（高级未启用，仅本地）"
-                print(
-                    f"识别完成{detail}，{len(wav)} 字节 WAV，文本长度 {len(text)}",
-                    flush=True,
-                )
-            write_completion(self, text, bool(payload.get("stream")))
+            write_completion(self, result.text, bool(payload.get("stream")))
 
         def read_json(self):
             length_header = self.headers.get("Content-Length")

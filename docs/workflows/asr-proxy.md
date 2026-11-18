@@ -1,17 +1,16 @@
-# 启动本地 Whisper 转写代理
+# 启动本地转写代理（SenseVoice / Whisper 兜底）
 
-一条命令拉起本机 whisper-server，并对外提供闪电说可用的 `POST /v1/chat/completions`。闪电说自定义服务商地址填 `http://127.0.0.1:<port>/v1`（`<port>` 来自配置）。
+一条命令启动代理，对外提供闪电说可用的 `POST /v1/chat/completions`。本地兜底在 **SenseVoice** 与 **Whisper** 中二选一（`configs/proxy.json` → `local.engine`）；远程豆包规则见 [`specs/prds/prd-00001-dual-write.md`](../../specs/prds/prd-00001-dual-write.md)。本地引擎选择见 [`specs/prds/prd-00002-local-fallback.md`](../../specs/prds/prd-00002-local-fallback.md)。
 
-选用文本规则（本地 / 高级并行、回落、空文本）见 [`specs/prds/prd-00001-dual-write.md`](../../specs/prds/prd-00001-dual-write.md)，本篇只写启动与配置入口。
+默认对外端口 **18888**（`proxy.json` 的 `port`）。
 
 ## 入口
 
 ```bash
 cd /Users/peng.zhi/Documents/Codex/0012-语音转写代理
+uv sync
 .venv/bin/python scripts/whisper_openai_asr_proxy.py
 ```
-
-端口、模型、whisper 路径都在 [`configs/proxy.json`](../../configs/proxy.json)，无需再传 `--port` / `--model`。
 
 ```bash
 .venv/bin/python scripts/whisper_openai_asr_proxy.py --help
@@ -23,18 +22,41 @@ cd /Users/peng.zhi/Documents/Codex/0012-语音转写代理
 
 | 文件 | 入库 | 说明 |
 |---|---|---|
-| [`configs/proxy.json`](../../configs/proxy.json) | 是 | `bind_host`、`port`、whisper 路径/模型/超时 |
+| [`configs/proxy.json`](../../configs/proxy.json) | 是 | `bind_host`、`port`（默认 18888）、`local`（引擎意图）、whisper 路径/超时、日志 |
 | [`configs/premium.json`](../../configs/premium.json) | 是 | 高级模型列表（无密钥；`api_key_env` 为变量名） |
 | [`.env.example`](../../.env.example) → `.env` | 模板是 / `.env` 否 | 豆包密钥 `DOUBAO_ASR_API_KEY` |
 
-监听关系（由 `port` 推导，不单独配置内部端口）：
+### `local.engine`
+
+| 值 | 含义 |
+|---|---|
+| `auto`（默认） | 有 SenseVoice 三件套 → SenseVoice；否则 Whisper 文件齐全 → Whisper；否则本地关闭 |
+| `sensevoice` | 只尝试 SenseVoice；不可用则本地关闭（不偷偷切 Whisper） |
+| `whisper` | 只尝试 Whisper；不可用则本地关闭 |
+| `off` | 不跑本地 |
+
+`local.engine` 是用户意图，启动后不会被改成探测结果。探测结果写在 `local.last_resolved`；若 `sensevoice.model_dir` 为空则会填上找到的路径。
+
+SenseVoice 三件套：`model.onnx` + `tokens.json` + `config.yaml`。默认探测：
+
+- macOS：`~/Library/Application Support/Shandianshuo/workspace/models/sensevoice-small`
+- Windows：`%APPDATA%\Shandianshuo\workspace\models\sensevoice-small`，其次 `%APPDATA%\cn.shandianshuo.desktop\...`
+
+### 依赖安装（一条命令）
+
+```bash
+cd /Users/peng.zhi/Documents/Codex/0012-语音转写代理
+uv sync
+```
+
+会按 `pyproject.toml` / `uv.lock` 装齐 SenseVoice 所需包。缺依赖时本路关闭，进程仍监听；日志提示再执行 `uv sync`（启动时不自动联网装包）。
+
+监听关系：
 
 | 地址 | 用途 |
 |---|---|
-| `http://<bind_host>:<port>/v1` | 闪电说自定义服务商 |
-| `http://<bind_host>:<port+1>` | 本机 whisper-server（仅代理转发） |
-
-改端口或模型：编辑 `configs/proxy.json` 后重启。
+| `http://<bind_host>:<port>/v1` | 闪电说自定义服务商（默认 `http://127.0.0.1:18888/v1`） |
+| `http://<bind_host>:<port+1>` | 仅当本地引擎为 Whisper 时才拉起 whisper-server |
 
 ## 密钥
 
@@ -43,30 +65,46 @@ cp .env.example .env
 # 编辑 .env：DOUBAO_ASR_API_KEY=你的新版 API Key
 ```
 
-启动脚本会加载本机 `.env`，且不覆盖已有环境变量。未设置密钥也可启动，仅走本地 Whisper。
+未设置密钥也可启动：有本地则仅本地；无本地则请求会 502。
+
+## 闪电说怎么填（Chat 音频）
+
+启动后控制台用 Rich 打一块 **ASR Proxy** 摘要，分两段：
+
+1. **运行状态**：对外地址、高级模型、本地引擎  
+2. **闪电说自定义服务商（Chat 音频）**：始终给出接入方式、Base URL、API Key `local`、模型 `medium`；以及配置结果  
+   - 成功：`已写入/已更新自定义服务商配置` + `config.json` 路径；提示在闪电说里刷新设置  
+   - 失败：`未写入：…`；按上面四项在闪电说里手填  
 
 ## 日常步骤
 
-1. 确认本机已编译 whisper-server，且 `proxy.json` 里的路径与模型可用。
-2. 若要用高级模型：配置 `.env` 中的 `DOUBAO_ASR_API_KEY`。
-3. 无参启动；日志出现「对外地址」和「whisper-server 已就绪」后可用。
-4. 闪电说地址填日志里的 `http://127.0.0.1:<port>/v1`。
-5. 停服务：终端 Ctrl+C。
+1. `uv sync`；若要用 Whisper 兜底，再准备好 whisper-server + ggml。
+2. （可选）配置 `.env` 豆包密钥。
+3. 无参启动；看摘要两段。
+4. 闪电说：配置已写入/更新则刷新设置；未写入则按摘要四项手填。
+5. 停服务：Ctrl+C。
 
 ## 产物
 
-- 无落盘产物；识别文本经 HTTP 返回给闪电说。
-- 控制台日志含结局、提供商名、失败种类、WAV 字节数与文本长度；不含密钥与音频内容。
+- 无业务落盘产物；识别文本经 HTTP 返回。
+- 请求日志：`temp/logs/asr-proxy.log`（约 2MB×5）。
+
+| 字段 | 含义 |
+|---|---|
+| `chosen` | `doubao` / `local` / `failed` |
+| `local_engine` | `sensevoice` / `whisper` / `off` |
+| `wav_bytes` / `wav_sec≈` | 入站 WAV |
+| `premium_*` / `local_*` / `reply_chars` | 双写耗时与长度 |
 
 ## 失败排查
 
 | 现象 | 处理 |
 |---|---|
-| 找不到 whisper-server / 模型 | 检查 `configs/proxy.json` 的 `whisper.root` / `bin` / `model` |
-| 无法监听端口 | 改 `proxy.json` 的 `port`，或停掉占用 `port` 与 `port+1` 的进程 |
-| 闪电说 404 `/v1/chat/completions` | 地址须带 `/v1` |
-| whisper-server 就绪超时 | 调大 `whisper.ready_timeout_sec`；先看子进程是否提前退出 |
-| 豆包鉴权失败回落本地 | 核对 `.env` 里 `DOUBAO_ASR_API_KEY`；重启后再试 |
+| 本地关闭且提示 deps_missing | 在本仓根目录执行 `uv sync` |
+| 找不到 SenseVoice 三件套 | 在闪电说下载 SenseVoice，或填 `local.sensevoice.model_dir` |
+| 找不到 whisper-server / 模型 | 检查 `whisper.*`；或改用 `auto`/`sensevoice` |
+| 无法监听 18888 | 停占用进程，或改 `port`（内部 Whisper 为 port+1） |
+| 闪电说配置未改写 | 看摘要「配置 未写入」；按同段四项手填 |
 
 ## 测试
 

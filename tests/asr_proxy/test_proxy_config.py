@@ -31,6 +31,7 @@ class ProxyConfigTests(unittest.TestCase):
         config = load_proxy_config(path)
         self.assertEqual(config.bind_host, raw["bind_host"])
         self.assertEqual(config.port, raw["port"])
+        self.assertEqual(config.port, 18888)
         self.assertEqual(config.internal_port, raw["port"] + 1)
         self.assertEqual(config.whisper.model, raw["whisper"]["model"])
         self.assertEqual(config.whisper.language, raw["whisper"]["language"])
@@ -39,6 +40,8 @@ class ProxyConfigTests(unittest.TestCase):
             float(raw["whisper"]["ready_timeout_sec"]),
         )
         self.assertTrue(str(config.whisper.bin).endswith("whisper-server"))
+        self.assertEqual(config.local.engine, raw["local"]["engine"])
+        self.assertEqual(config.local.engine, "auto")
 
     def test_missing_field_fails(self):
         path = _write_config({"bind_host": "127.0.0.1", "port": 8080})

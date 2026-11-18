@@ -1,6 +1,17 @@
 {
   "bind_host": "127.0.0.1",
   "port": 18888,
+  "local": {
+    "engine": "auto",
+    "sensevoice": {
+      "model_dir": ""
+    },
+    "last_resolved": {
+      "engine": "",
+      "model_dir": "",
+      "skip_reason": ""
+    }
+  },
   "whisper": {
     "root": "/Users/peng.zhi/Documents/Object/参考项目/whisper.cpp",
     "bin": "build/bin/whisper-server",
@@ -9,5 +20,11 @@
     "language": "zh",
     "ready_timeout_sec": 180,
     "inference_timeout_sec": 600
+  },
+  "logging": {
+    "dir": "temp/logs",
+    "file": "asr-proxy.log",
+    "max_bytes": 2097152,
+    "backup_count": 5
   }
 }
